@@ -43,6 +43,9 @@ RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
 RUN pip install --no-cache-dir \
         torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
         --index-url https://download.pytorch.org/whl/cu118
+# Herramientas de build que el entorno NO-aislado necesitará para compilar los
+# rasterizadores (setuptools/wheel/ninja deben estar ANTES de --no-build-isolation).
+RUN pip install --no-cache-dir setuptools==69.5.1 wheel==0.43.0 ninja==1.11.1
 
 # ── Paso 3: dependencias Python de 2DGS (versiones conocidas-buenas) ──
 RUN pip install --no-cache-dir \
@@ -64,11 +67,16 @@ RUN git clone https://github.com/hbb1/2d-gaussian-splatting.git --recursive 2dgs
 WORKDIR /opt/2dgs
 
 # ── Paso 5: compilar los submódulos CUDA UNO POR UNO (orden importa) ──
+# CLAVE (--no-build-isolation): pip normalmente compila en un entorno AISLADO
+# que NO ve el torch que instalamos arriba. El setup.py de estos rasterizadores
+# hace 'import torch' para compilar → sin el flag falla con
+# "ModuleNotFoundError: No module named 'torch'". Con --no-build-isolation
+# usan el torch YA instalado. (Problema conocido de TODOS los rasterizadores GS.)
 # Si alguno falla, el build PARA aquí con el error claro (mejor que seguir).
 #   a) diff-surfel-rasterization: el rasterizador de surfels 2D (el núcleo)
-RUN pip install --no-cache-dir ./submodules/diff-surfel-rasterization
+RUN pip install --no-cache-dir --no-build-isolation ./submodules/diff-surfel-rasterization
 #   b) simple-knn: vecinos cercanos para inicializar densidad
-RUN pip install --no-cache-dir ./submodules/simple-knn
+RUN pip install --no-cache-dir --no-build-isolation ./submodules/simple-knn
 
 # ── Paso 6: verificación dentro de la imagen (que TODO importa bien) ──
 # Si esto falla, la imagen no sirve y lo sabremos en el build, no en RunPod.
