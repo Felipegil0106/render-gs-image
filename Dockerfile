@@ -80,10 +80,12 @@ RUN pip install --no-cache-dir --no-build-isolation ./submodules/simple-knn
 
 # ── Paso 6: verificación dentro de la imagen (que TODO importa bien) ──
 # Si esto falla, la imagen no sirve y lo sabremos en el build, no en RunPod.
-RUN python -c "import torch; assert torch.version.cuda=='11.8', torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)" && \
-    python -c "import diff_surfel_rasterization; print('diff-surfel-rasterization OK')" && \
-    python -c "import simple_knn._C; print('simple-knn OK')" && \
-    python -c "import open3d; print('open3d', open3d.__version__)" && \
+# IMPORTANTE: 'import torch' debe ir SIEMPRE antes de importar las extensiones
+# compiladas (diff_surfel_rasterization, simple_knn._C) EN EL MISMO proceso.
+# Esas extensiones dependen de libc10.so (de PyTorch); si torch no se importó
+# antes en el mismo intérprete, fallan con "libc10.so: cannot open shared
+# object file". Por eso aquí hacemos un único python -c que importa torch 1º.
+RUN python -c "import torch; assert torch.version.cuda=='11.8', torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda); import diff_surfel_rasterization; print('diff-surfel-rasterization OK'); import simple_knn._C; print('simple-knn OK'); import open3d; print('open3d', open3d.__version__)" && \
     echo "=== imagen 2DGS lista (render-gs:v1) ==="
 
 WORKDIR /workspace
