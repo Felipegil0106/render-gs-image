@@ -27,10 +27,13 @@ ENV CUDA_HOME=/usr/local/cuda
 # ── Paso 1: dependencias del sistema ──
 #   git/wget/build-essential: para clonar y compilar
 #   libgl1/libglib2.0: OpenCV y render headless
-#   colmap NO se instala aquí (las poses llegan ya hechas desde R2)
+#   colmap: genera las poses de cámara (SfM) porque solo tenemos fotos.
+#     El paquete 'colmap' de Ubuntu 22.04 trae extracción SIFT, matching y
+#     mapper; usa la CUDA 11.8 de la base para SIFT en GPU.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git wget ca-certificates build-essential cmake ninja-build \
         libgl1 libglib2.0-0 libgomp1 \
+        colmap \
         python3.10 python3.10-dev python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -86,7 +89,8 @@ RUN pip install --no-cache-dir --no-build-isolation ./submodules/simple-knn
 # antes en el mismo intérprete, fallan con "libc10.so: cannot open shared
 # object file". Por eso aquí hacemos un único python -c que importa torch 1º.
 RUN python -c "import torch; assert torch.version.cuda=='11.8', torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda); import diff_surfel_rasterization; print('diff-surfel-rasterization OK'); import simple_knn._C; print('simple-knn OK'); import open3d; print('open3d', open3d.__version__)" && \
-    echo "=== imagen 2DGS lista (render-gs:v1) ==="
+    colmap -h > /dev/null 2>&1 && echo "colmap OK" && \
+    echo "=== imagen 2DGS+COLMAP lista (render-gs:v2) ==="
 
 WORKDIR /workspace
 CMD ["/bin/bash"]
