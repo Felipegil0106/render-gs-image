@@ -49,6 +49,6 @@ jobs:
             docker buildx build \
               --builder ${{ steps.buildx.outputs.name }} \
               --file ./Dockerfile \
-              --tag ${{ secrets.DOCKERHUB_USERNAME }}/render-gs:v4 \
+              --tag ${{ secrets.DOCKERHUB_USERNAME }}/gaussian-mesh:v4 \
               --push \
               .
