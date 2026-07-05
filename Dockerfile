@@ -1,5 +1,10 @@
 # ════════════════════════════════════════════════════════════════════════
-# Contenedor gaussian-mesh:v4 — MASt3R + 2DGS + OpenMVS + BLOQUE B
+# Contenedor gaussian-mesh:v4.2 — MASt3R + 2DGS + OpenMVS + BLOQUE B
+# FIX v4.1: numpy queda en 1.26.4 en TODA la imagen (v4 lo bajaba a 1.24.4
+# y rompía faiss, que exige >=1.25; scipy exige <1.27 → 1.26.4 es el punto
+# exacto, y es el que la v3 usa en producción). faiss y asmk quedan pineados.
+# FIX v4.2: la imagen escribe su versión en /opt/IMAGE_TAG y el worker la
+# imprime en el banner del log → nunca más adivinar QUÉ imagen corrió el pod.
 #   (priors monoculares de profundidad/normales + bundle adjustment de poses)
 # ════════════════════════════════════════════════════════════════════════
 # NUEVO EN v4 (Bloque B):
@@ -49,7 +54,7 @@ RUN pip install --no-cache-dir setuptools==69.5.1 wheel==0.43.0 ninja==1.11.1
 
 # ── Paso 3: dependencias Python de 2DGS ──
 RUN pip install --no-cache-dir \
-        numpy==1.24.4 \
+        numpy==1.26.4 \
         plyfile==0.8.1 \
         tqdm==4.66.1 \
         opencv-python-headless==4.8.1.78 \
@@ -93,7 +98,7 @@ WORKDIR /opt/mast3r
 # torch de CUDA 11.8, y un torch 13.0 las invalida.) Por eso también quitamos el
 # extra [torch] de huggingface-hub. El assert final aborta el build (gratis) si
 # algo cambió torch.
-RUN printf 'torch==2.0.1\ntorchvision==0.15.2\n' > /opt/torch-constraints.txt && \
+RUN printf 'torch==2.0.1\ntorchvision==0.15.2\nnumpy==1.26.4\n' > /opt/torch-constraints.txt && \
     pip install --no-cache-dir -c /opt/torch-constraints.txt \
         roma \
         einops \
@@ -104,7 +109,7 @@ RUN printf 'torch==2.0.1\ntorchvision==0.15.2\n' > /opt/torch-constraints.txt &&
         "pyglet<2" \
         tensorboard \
         cython \
-        faiss-cpu && \
+        faiss-cpu==1.14.3 && \
     python -c "import torch; assert torch.version.cuda=='11.8', 'torch fue cambiado a CUDA '+str(torch.version.cuda); print('OK: torch sigue en 2.0.1 / CUDA 11.8')"
 
 # Compilar la extensión CUDA 'curope' (acelera el cálculo de posiciones RoPE
@@ -115,6 +120,7 @@ RUN cd /opt/mast3r/dust3r/croco/models/curope && \
 
 # asmk (Aggregated Selective Match Kernels) para el retrieval por imagen.
 RUN git clone https://github.com/jenicek/asmk.git /opt/asmk && \
+    cd /opt/asmk && git checkout 2a96d9c03a841dffdfddabc699a20512dcd09363 && \
     cd /opt/asmk/cython && cythonize *.pyx && \
     cd /opt/asmk && pip install --no-cache-dir -c /opt/torch-constraints.txt -e .
 
@@ -211,10 +217,10 @@ RUN python -c "import torch; assert torch.version.cuda=='11.8', torch.version.cu
 # El archivo de constraints CLAVA torch/torchvision/numpy para que NADA de
 # esto actualice PyTorch (lección aprendida del primer build: un torch de
 # CUDA 13 invalida las extensiones CUDA compiladas). El assert aborta gratis.
-RUN printf 'torch==2.0.1\ntorchvision==0.15.2\nnumpy==1.24.4\n' > /opt/pip-constraints-v4.txt && \
+RUN printf 'torch==2.0.1\ntorchvision==0.15.2\nnumpy==1.26.4\n' > /opt/pip-constraints-v4.txt && \
     pip install --no-cache-dir -c /opt/pip-constraints-v4.txt \
         pycolmap==4.1.0 xatlas==0.0.11 geffnet==1.0.2 && \
-    python -c "import torch, numpy; assert torch.version.cuda=='11.8', torch.version.cuda; assert numpy.__version__=='1.24.4', numpy.__version__; print('OK: torch y numpy intactos')"
+    python -c "import torch, numpy; assert torch.version.cuda=='11.8', torch.version.cuda; assert numpy.__version__=='1.26.4', numpy.__version__; print('OK: torch y numpy intactos')"
 
 # Código de los DOS modelos, PINEADO por SHA a los commits validados en local.
 # (El repo de DSINE YA se movió de commit — fetch por SHA trae EXACTAMENTE lo
@@ -242,10 +248,14 @@ RUN mkdir -p /opt/models && cd /opt/models && \
      echo "AVISO: dsine.pt no bajo; el worker usara normales-desde-profundidad") && \
     ls -lh /opt/models/
 
+# ── Marcador de versión: el worker lo lee y lo imprime en el banner ──
+RUN echo "v4.2" > /opt/IMAGE_TAG
+
 # ── Paso 9: verificación v4 (imports ligeros, SIN instanciar modelos) ──
 # DSINE: sys.path con /opt/dsine PRIMERO para que sus paquetes models/ y utils/
 # ganen a los de 2DGS/MASt3R del PYTHONPATH (misma técnica que usa el worker).
-RUN python -c "import pycolmap; print('pycolmap', pycolmap.__version__); import xatlas; print('xatlas OK'); import geffnet; print('geffnet OK')" && \
+RUN python -c "import numpy; assert numpy.__version__=='1.26.4', numpy.__version__; import faiss; import cv2; import open3d; import torch; assert torch.version.cuda=='11.8'; print('re-chequeo post-instalaciones: numpy', numpy.__version__, '+ faiss + cv2 + open3d + torch OK')" && \
+    python -c "import pycolmap; print('pycolmap', pycolmap.__version__); import xatlas; print('xatlas OK'); import geffnet; print('geffnet OK')" && \
     python -c "import sys; sys.path.insert(0,'/opt/depth_anything_v2/metric_depth'); from depth_anything_v2.dpt import DepthAnythingV2; print('DAv2 import OK')" && \
     python -c "import sys; sys.path.insert(0,'/opt/dsine'); import geffnet; _o=geffnet.create_model; geffnet.create_model=lambda *a,**k:_o(*a,**{**k,'pretrained':False}); from models.dsine import DSINE; import utils.utils as du; assert hasattr(du,'pad_input'); print('DSINE import OK')" && \
     test -f /opt/models/depth_anything_v2_metric_hypersim_vitb.pth && echo "checkpoint profundidad OK" && \
