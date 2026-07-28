@@ -248,8 +248,74 @@ RUN mkdir -p /opt/models && cd /opt/models && \
      echo "AVISO: dsine.pt no bajo; el worker usara normales-desde-profundidad") && \
     ls -lh /opt/models/
 
+
+# ════════════════════════════════════════════════════════════════════════
+# PASO 10 (v5.0) — FASE 1: PGSR junto a 2DGS
+# ════════════════════════════════════════════════════════════════════════
+# POR QUE: medimos que el 52% del ruido de nuestras paredes es ondulacion de
+# 20-50 cm. Ni el TSDF ni el aplanado posterior pueden tocar esa banda porque
+# se fabrica en el ENTRENAMIENTO: la perdida fotometrica no sabe donde esta
+# una pared lisa sin textura y la curva. PGSR impone planaridad durante el
+# entrenamiento (profundidad insesgada + consistencia multi-vista fotometrica
+# y geometrica), que es exactamente el ataque a esa banda.
+#
+# 2DGS SE QUEDA INTACTO en /opt/2dgs. El worker elige con MESH_ENGINE:
+#     MESH_ENGINE=pgsr  (por defecto)      MESH_ENGINE=2dgs  (respaldo)
+# Si PGSR no estuviera en la imagen, el worker lo detecta y usa 2DGS solo.
+#
+# CONFLICTO DE MODULOS (importante): 2DGS y PGSR tienen paquetes con el MISMO
+# nombre (scene/, utils/, arguments/, gaussian_renderer/). No se rompen entre
+# si porque Python pone PRIMERO la carpeta del script que se ejecuta: al correr
+# /opt/pgsr/train.py ganan los modulos de PGSR aunque /opt/2dgs este en el
+# PYTHONPATH. Por eso NO se agrega /opt/pgsr al PYTHONPATH.
+#
+# LICENCIA — LEER ANTES DE COBRAR POR ESTO: PGSR esta construido sobre el 3DGS
+# de INRIA, cuya licencia es de INVESTIGACION, NO COMERCIAL (2DGS viene del
+# mismo origen, o sea que esto ya aplicaba antes). Si Vessel Render Lab va a
+# ser un producto de pago hay que licenciarlo con INRIA o cambiar el nucleo.
+# ════════════════════════════════════════════════════════════════════════
+
+# --recursive es OBLIGATORIO: los submodulos (diff-plane-rasterization,
+# simple-knn) son git submodules y sin esto llegan las carpetas VACIAS.
+WORKDIR /opt
+RUN git clone --recursive https://github.com/zju3dv/PGSR.git pgsr
+
+WORKDIR /opt/pgsr
+
+# Dependencias de PGSR SIN romper las nuestras: su requirements.txt puede
+# traer torch/open3d/numpy/opencv y reinstalarlos con otra version, lo que
+# romperia todo el post-proceso (dependemos de open3d 0.18 y numpy 1.26.4).
+# Por eso se filtran esas lineas antes de instalar.
+RUN if [ -f requirements.txt ]; then \
+        grep -viE '^[[:space:]]*(torch|torchvision|torchaudio|open3d|numpy|opencv-python|opencv-python-headless)([=<>~!].*)?[[:space:]]*$' \
+            requirements.txt > /tmp/pgsr_req.txt || true; \
+        echo "--- dependencias de PGSR que SI se instalan ---"; cat /tmp/pgsr_req.txt; \
+        pip install --no-cache-dir -r /tmp/pgsr_req.txt || true; \
+    else echo "PGSR sin requirements.txt"; fi
+
+# Rasterizador CUDA propio de PGSR. Este es el paso lento del build (5-15 min).
+# TORCH_CUDA_ARCH_LIST ya viene de arriba con 8.0;8.6;8.9;9.0 -> cubre A6000
+# (8.6) y RTX 4090 (8.9), asi que la misma imagen sirve en los dos pods.
+RUN pip install --no-cache-dir --no-build-isolation ./submodules/diff-plane-rasterization
+
+# simple-knn de PGSR: mismo nombre de modulo que el de 2DGS y mismo codigo
+# original de 3DGS, asi que reinstalarlo encima es inofensivo.
+RUN pip install --no-cache-dir --no-build-isolation ./submodules/simple-knn
+
+# Verificacion de PGSR EN EL BUILD: si algo falla, el build se detiene aqui
+# y no te enteras a mitad de un render de una hora.
+RUN python -c "import diff_plane_rasterization; print('diff-plane-rasterization OK')" && \
+    python -c "import simple_knn._C; print('simple-knn OK')" && \
+    python -c "import diff_surfel_rasterization; print('diff-surfel-rasterization (2DGS) SIGUE OK')" && \
+    test -f /opt/pgsr/train.py && test -f /opt/pgsr/render.py && echo "PGSR train.py y render.py OK" && \
+    test -f /opt/2dgs/train.py && echo "2DGS intacto OK" && \
+    python -c "import numpy; assert numpy.__version__=='1.26.4', 'numpy cambiado por PGSR: '+numpy.__version__; import open3d; assert open3d.__version__.startswith('0.18'), 'open3d cambiado por PGSR: '+open3d.__version__; print('numpy y open3d intactos:', numpy.__version__, open3d.__version__)" && \
+    echo "=== VERIFICACION_PGSR_OK ==="
+
+WORKDIR /opt
+
 # ── Marcador de versión: el worker lo lee y lo imprime en el banner ──
-RUN echo "v4.2" > /opt/IMAGE_TAG
+RUN echo "v5.0-pgsr" > /opt/IMAGE_TAG
 
 # ── Paso 9: verificación v4 (imports ligeros, SIN instanciar modelos) ──
 # DSINE: sys.path con /opt/dsine PRIMERO para que sus paquetes models/ y utils/
