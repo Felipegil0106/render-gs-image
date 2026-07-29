@@ -282,16 +282,49 @@ RUN git clone --recursive https://github.com/zju3dv/PGSR.git pgsr
 
 WORKDIR /opt/pgsr
 
-# Dependencias de PGSR SIN romper las nuestras: su requirements.txt puede
-# traer torch/open3d/numpy/opencv y reinstalarlos con otra version, lo que
-# romperia todo el post-proceso (dependemos de open3d 0.18 y numpy 1.26.4).
-# Por eso se filtran esas lineas antes de instalar.
-RUN if [ -f requirements.txt ]; then \
-        grep -viE '^[[:space:]]*(torch|torchvision|torchaudio|open3d|numpy|opencv-python|opencv-python-headless)([=<>~!].*)?[[:space:]]*$' \
-            requirements.txt > /tmp/pgsr_req.txt || true; \
-        echo "--- dependencias de PGSR que SI se instalan ---"; cat /tmp/pgsr_req.txt; \
-        pip install --no-cache-dir -r /tmp/pgsr_req.txt || true; \
-    else echo "PGSR sin requirements.txt"; fi
+# ── Dependencias de PGSR — COMPROBADAS UNA POR UNA ───────────────────────
+# FALLO REAL DEL PRIMER INTENTO: el requirements.txt de PGSR pide pytorch3d.
+# El pip fallo (pytorch3d no tiene wheel para esta combinacion y compilarlo
+# son 30+ min de CUDA), pero yo habia puesto "|| true" al final, asi que el
+# error se TRAGO en silencio... y el pod reventó una hora despues con
+# "ModuleNotFoundError: No module named 'pytorch3d'". Aqui ya NO hay "|| true":
+# si algo falla, el build se detiene.
+#
+# Revisando el codigo de PGSR: de todo pytorch3d usa UNA sola funcion,
+# quaternion_to_matrix, en un solo sitio (scene/gaussian_model.py linea 161).
+# Instalar toda la libreria (build CUDA pesado, conflictos con torch 2.0.1)
+# para una funcion de 12 lineas no tiene sentido: se provee esa funcion.
+# La formula se verifico contra build_rotation del 3DGS original (que es lo
+# que PGSR reemplazo) y contra scipy: error maximo 8.9e-16, o sea identica.
+#
+# Del requirements.txt: open3d, opencv-python y trimesh YA estan en la imagen
+# con las versiones que necesita nuestro post-proceso (no se tocan). lpips solo
+# lo usan los scripts de evaluacion, que nosotros no ejecutamos. En el camino
+# real (train.py + render.py y todo lo que importan) solo faltaba plyfile.
+RUN pip install --no-cache-dir plyfile
+
+# quaternion_to_matrix: reemplazo exacto de la unica funcion que PGSR usa.
+RUN SP=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    mkdir -p "$SP/pytorch3d" && \
+    : > "$SP/pytorch3d/__init__.py" && \
+    printf '%s\n' \
+      '# Reemplazo minimo de pytorch3d.transforms para PGSR.' \
+      '# PGSR solo usa quaternion_to_matrix (scene/gaussian_model.py:161).' \
+      '# Convencion real-primero (w,x,y,z), la misma de 3DGS y de pytorch3d.' \
+      '# Verificado contra build_rotation de 3DGS y scipy: error 8.9e-16.' \
+      'import torch' \
+      '' \
+      'def quaternion_to_matrix(quaternions):' \
+      '    r, i, j, k = torch.unbind(quaternions, -1)' \
+      '    two_s = 2.0 / (quaternions * quaternions).sum(-1)' \
+      '    o = torch.stack((' \
+      '        1 - two_s * (j * j + k * k), two_s * (i * j - k * r), two_s * (i * k + j * r),' \
+      '        two_s * (i * j + k * r), 1 - two_s * (i * i + k * k), two_s * (j * k - i * r),' \
+      '        two_s * (i * k - j * r), two_s * (j * k + i * r), 1 - two_s * (i * i + j * j),' \
+      '    ), -1)' \
+      '    return o.reshape(quaternions.shape[:-1] + (3, 3))' \
+      > "$SP/pytorch3d/transforms.py" && \
+    python -c "import torch; from pytorch3d.transforms import quaternion_to_matrix as f; q=torch.randn(64,4,dtype=torch.float64); R=f(q); n=q/q.norm(dim=1,keepdim=True); w,x,y,z=n[:,0],n[:,1],n[:,2],n[:,3]; import math; assert (R.det()-1).abs().max()<1e-9, 'determinante != 1'; assert (R@R.transpose(1,2)-torch.eye(3,dtype=torch.float64)).abs().max()<1e-9, 'no ortogonal'; assert (R[:,0,0]-(1-2*(y*y+z*z))).abs().max()<1e-9, 'no coincide con 3DGS'; print('quaternion_to_matrix verificado: rotaciones validas y formula igual a 3DGS')"
 
 # Rasterizador CUDA propio de PGSR. Este es el paso lento del build (5-15 min).
 # TORCH_CUDA_ARCH_LIST ya viene de arriba con 8.0;8.6;8.9;9.0 -> cubre A6000
@@ -314,6 +347,7 @@ RUN pip install --no-cache-dir --no-build-isolation ./submodules/simple-knn
 RUN python -c "import torch; assert torch.version.cuda=='11.8', torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda); import diff_plane_rasterization; print('diff-plane-rasterization (PGSR) OK'); import simple_knn._C; print('simple-knn OK'); import diff_surfel_rasterization; print('diff-surfel-rasterization (2DGS) SIGUE OK'); import numpy; assert numpy.__version__=='1.26.4', 'numpy cambiado por PGSR: '+numpy.__version__; import open3d; assert open3d.__version__.startswith('0.18'), 'open3d cambiado por PGSR: '+open3d.__version__; print('numpy y open3d intactos:', numpy.__version__, open3d.__version__)" && \
     test -f /opt/pgsr/train.py && test -f /opt/pgsr/render.py && echo "PGSR train.py y render.py OK" && \
     test -f /opt/2dgs/train.py && echo "2DGS intacto OK" && \
+    cd /opt/pgsr && python -c "import torch; from scene.gaussian_model import GaussianModel; from gaussian_renderer import render; from scene import Scene; print('CADENA DE IMPORTS DE PGSR OK (esto es lo que fallaba con pytorch3d)')" && \
     echo "=== VERIFICACION_PGSR_OK ==="
 
 WORKDIR /opt
