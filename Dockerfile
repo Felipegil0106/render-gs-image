@@ -304,12 +304,16 @@ RUN pip install --no-cache-dir --no-build-isolation ./submodules/simple-knn
 
 # Verificacion de PGSR EN EL BUILD: si algo falla, el build se detiene aqui
 # y no te enteras a mitad de un render de una hora.
-RUN python -c "import diff_plane_rasterization; print('diff-plane-rasterization OK')" && \
-    python -c "import simple_knn._C; print('simple-knn OK')" && \
-    python -c "import diff_surfel_rasterization; print('diff-surfel-rasterization (2DGS) SIGUE OK')" && \
+# OJO (fallo real del primer build): simple_knn._C y los rasterizadores son
+# extensiones compiladas CONTRA PyTorch. Si se importan en un proceso donde
+# torch NO se importo antes, fallan con:
+#     ImportError: libc10.so: cannot open shared object file
+# No es que esten mal instalados: es que libc10.so (de torch) no esta cargada
+# todavia. Por eso TODO va en UN SOLO python -c que empieza por import torch,
+# igual que la verificacion de la v4.2 mas arriba en este mismo Dockerfile.
+RUN python -c "import torch; assert torch.version.cuda=='11.8', torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda); import diff_plane_rasterization; print('diff-plane-rasterization (PGSR) OK'); import simple_knn._C; print('simple-knn OK'); import diff_surfel_rasterization; print('diff-surfel-rasterization (2DGS) SIGUE OK'); import numpy; assert numpy.__version__=='1.26.4', 'numpy cambiado por PGSR: '+numpy.__version__; import open3d; assert open3d.__version__.startswith('0.18'), 'open3d cambiado por PGSR: '+open3d.__version__; print('numpy y open3d intactos:', numpy.__version__, open3d.__version__)" && \
     test -f /opt/pgsr/train.py && test -f /opt/pgsr/render.py && echo "PGSR train.py y render.py OK" && \
     test -f /opt/2dgs/train.py && echo "2DGS intacto OK" && \
-    python -c "import numpy; assert numpy.__version__=='1.26.4', 'numpy cambiado por PGSR: '+numpy.__version__; import open3d; assert open3d.__version__.startswith('0.18'), 'open3d cambiado por PGSR: '+open3d.__version__; print('numpy y open3d intactos:', numpy.__version__, open3d.__version__)" && \
     echo "=== VERIFICACION_PGSR_OK ==="
 
 WORKDIR /opt
